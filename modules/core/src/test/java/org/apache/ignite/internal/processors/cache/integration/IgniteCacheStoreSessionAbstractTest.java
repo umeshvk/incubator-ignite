@@ -324,33 +324,32 @@ public abstract class IgniteCacheStoreSessionAbstractTest extends IgniteCacheAbs
         private void checkSession(String mtd) {
             assertNotNull(ignite);
 
-            if (!expData.isEmpty()) {
+            assertFalse(expData.isEmpty());
 
-                ExpectedData exp = expData.remove(0);
+            ExpectedData exp = expData.remove(0);
 
-                assertEquals(exp.expMtd, mtd);
+            assertEquals(exp.expMtd, mtd);
 
-                CacheStoreSession ses = session();
+            CacheStoreSession ses = session();
 
-                assertNotNull(ses);
+            assertNotNull(ses);
 
-                assertSame(ses, sesInParent);
+            assertSame(ses, sesInParent);
 
-                if (exp.tx)
-                    assertNotNull(ses.transaction());
-                else
-                    assertNull(ses.transaction());
+            if (exp.tx)
+                assertNotNull(ses.transaction());
+            else
+                assertNull(ses.transaction());
 
-                Map<Object, Object> props = ses.properties();
+            Map<Object, Object> props = ses.properties();
 
-                assertNotNull(props);
+            assertNotNull(props);
 
-                assertEquals(exp.expProps, props);
+            assertEquals(exp.expProps, props);
 
-                props.put(props.size(), mtd);
+            props.put(props.size(), mtd);
 
-                assertEquals(exp.expCacheName, ses.cacheName());
-            }
+            assertEquals(exp.expCacheName, ses.cacheName());
         }
     }
 }
