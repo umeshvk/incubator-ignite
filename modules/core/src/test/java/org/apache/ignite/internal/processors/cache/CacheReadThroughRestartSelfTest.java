@@ -44,6 +44,12 @@ public class CacheReadThroughRestartSelfTest extends GridCacheAbstractSelfTest {
     @Override protected IgniteConfiguration getConfiguration(String gridName) throws Exception {
         IgniteConfiguration cfg = super.getConfiguration(gridName);
 
+        TransactionConfiguration txCfg = new TransactionConfiguration();
+
+        txCfg.setTxSerializableEnabled(true);
+
+        cfg.setTransactionConfiguration(txCfg);
+
         CacheConfiguration cc = cacheConfiguration(gridName);
 
         cc.setLoadPreviousValue(false);
@@ -86,12 +92,18 @@ public class CacheReadThroughRestartSelfTest extends GridCacheAbstractSelfTest {
 
         cache = ignite.cache(null);
 
-        try (Transaction tx = ignite.transactions().
-            txStart(TransactionConcurrency.PESSIMISTIC, TransactionIsolation.REPEATABLE_READ, 100000, 1000)) {
-            for (int k = 0; k < 1000; k++)
-                assertNotNull("Null key. [key=key" + k + "].", cache.get("key" + k));
+        for (TransactionConcurrency txConcurrency : TransactionConcurrency.values()) {
+            for (TransactionIsolation txIsolation : TransactionIsolation.values()) {
+                try (Transaction tx = ignite.transactions().txStart(txConcurrency, txIsolation, 100000, 1000)) {
+                    for (int k = 0; k < 1000; k++) {
+                        String key = "key" + k;
 
-            tx.commit();
+                        assertNotNull("Null value for key: " + key, cache.get(key));
+                    }
+
+                    tx.commit();
+                }
+            }
         }
     }
 
@@ -112,7 +124,10 @@ public class CacheReadThroughRestartSelfTest extends GridCacheAbstractSelfTest {
 
         cache = ignite.cache(null);
 
-        for (int k = 0; k < 1000; k++)
-            assertNotNull("Null key. [key=key" + k + "].", cache.get("key" + k));
+        for (int k = 0; k < 1000; k++) {
+            String key = "key" + k;
+
+            assertNotNull("Null value for key: " + key, cache.get(key));
+        }
     }
 }
