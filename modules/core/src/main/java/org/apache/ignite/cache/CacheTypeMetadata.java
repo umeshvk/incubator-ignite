@@ -71,6 +71,10 @@ public class CacheTypeMetadata implements Serializable {
     @GridToStringInclude
     private Map<String, LinkedHashMap<String, IgniteBiTuple<Class<?>, Boolean>>> grps;
 
+    /** Aliases for fields. */
+    @GridToStringInclude
+    private Map<String, String> aliases;
+
     /**
      * Default constructor.
      */
@@ -88,6 +92,8 @@ public class CacheTypeMetadata implements Serializable {
         txtFlds = new LinkedHashSet<>();
 
         grps = new LinkedHashMap<>();
+
+        aliases = new HashMap<>();
     }
 
     /**
@@ -115,6 +121,8 @@ public class CacheTypeMetadata implements Serializable {
         txtFlds = new LinkedHashSet<>(src.getTextFields());
 
         grps = new LinkedHashMap<>(src.getGroups());
+
+        aliases = new HashMap<>(src.aliases);
     }
 
     /**
@@ -331,6 +339,28 @@ public class CacheTypeMetadata implements Serializable {
      */
     public void setGroups(Map<String, LinkedHashMap<String, IgniteBiTuple<Class<?>, Boolean>>> grps) {
         this.grps = grps;
+    }
+
+    /**
+     * Returns fields aliases.
+     *
+     * @return fields aliases.
+     */
+    public Map<String, String> getAliases() {
+        return aliases;
+    }
+
+    /**
+     * Adds field alias.
+     *
+     * @param alias Alias.
+     * @param fieldName Field name.
+     */
+    public void addAlias(String alias, String fieldName) {
+        A.notNull(alias, "alias");
+        A.notNull(fieldName, "fieldName");
+
+        aliases.put(alias, fieldName);
     }
 
     /** {@inheritDoc} */

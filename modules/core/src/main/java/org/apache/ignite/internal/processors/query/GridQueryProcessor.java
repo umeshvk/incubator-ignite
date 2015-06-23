@@ -121,56 +121,19 @@ public class GridQueryProcessor extends GridProcessorAdapter {
         idx.registerCache(ccfg);
 
         try {
-            if (!F.isEmpty(ccfg.getTypeMetadata())) {
-                for (CacheTypeMetadata meta : ccfg.getTypeMetadata()) {
-                    if (F.isEmpty(meta.getValueType()))
-                        throw new IgniteCheckedException("Value type is not set: " + meta);
+            if (!F.isEmpty(ccfg.getTypeMetadata()))
+                processTypeMetadata(ccfg);
+            else {
+                Class<?>[] clss = ccfg.getIndexedTypes();
 
-                    TypeDescriptor desc = new TypeDescriptor();
+                if (!F.isEmpty(clss)) {
+//                    processIndexedTypes(ccfg, clss);
 
-                    Class<?> valCls = U.classForName(meta.getValueType(), null);
+                    Collection<CacheTypeMetadata> meta = generateTypeMetadata(clss);
 
-                    desc.name(valCls != null ? typeName(valCls) : meta.getValueType());
+                    ccfg.setTypeMetadata(meta);
 
-                    desc.valueClass(valCls != null ? valCls : Object.class);
-                    desc.keyClass(
-                        meta.getKeyType() == null ?
-                            Object.class :
-                            U.classForName(meta.getKeyType(), Object.class));
-
-                    TypeId typeId;
-
-                    if (valCls == null || ctx.cacheObjects().isPortableEnabled()) {
-                        processPortableMeta(meta, desc);
-
-                        typeId = new TypeId(ccfg.getName(), ctx.cacheObjects().typeId(meta.getValueType()));
-                    }
-                    else {
-                        processClassMeta(meta, desc);
-
-                        typeId = new TypeId(ccfg.getName(), valCls);
-                    }
-
-                    addTypeByName(ccfg, desc);
-                    types.put(typeId, desc);
-
-                    desc.registered(idx.registerType(ccfg.getName(), desc));
-                }
-            }
-
-            Class<?>[] clss = ccfg.getIndexedTypes();
-
-            if (!F.isEmpty(clss)) {
-                for (int i = 0; i < clss.length; i += 2) {
-                    Class<?> keyCls = clss[i];
-                    Class<?> valCls = clss[i + 1];
-
-                    TypeDescriptor desc = processKeyAndValueClasses(keyCls, valCls);
-
-                    addTypeByName(ccfg, desc);
-                    types.put(new TypeId(ccfg.getName(), valCls), desc);
-
-                    desc.registered(idx.registerType(ccfg.getName(), desc));
+                    processTypeMetadata(ccfg);
                 }
             }
         }
@@ -178,6 +141,218 @@ public class GridQueryProcessor extends GridProcessorAdapter {
             idx.unregisterCache(ccfg);
 
             throw e;
+        }
+    }
+
+    /**
+     * @param clss Classes.
+     */
+    private Collection<CacheTypeMetadata> generateTypeMetadata(Class<?>[] clss) throws IgniteCheckedException {
+        List<CacheTypeMetadata> metadata = new ArrayList<>(clss.length / 2);
+
+        for (int i = 0; i < clss.length; i += 2) {
+            Class<?> keyCls = clss[i];
+            Class<?> valCls = clss[i + 1];
+
+            CacheTypeMetadata meta = new CacheTypeMetadata();
+
+            meta.setKeyType(keyCls);
+            meta.setValueType(valCls);
+
+            processClassAnnotations(keyCls, meta, null);
+            processClassAnnotations(valCls, meta, null);
+
+            metadata.add(meta);
+        }
+
+        return  metadata;
+    }
+
+    /**
+     * @param cls Class.
+     * @param meta Type metadata.
+     * @param parentField Parent field name.
+     */
+    private void processClassAnnotations(Class<?> cls, CacheTypeMetadata meta, String parentField)
+        throws IgniteCheckedException {
+        if (U.isJdk(cls) || idx.isGeometryClass(cls))
+            return;
+
+        for (Class<?> c = cls; c != null && !c.equals(Object.class); c = c.getSuperclass()) {
+            for (Field field : c.getDeclaredFields()) {
+                QueryTextField txtAnn = field.getAnnotation(QueryTextField.class);
+
+                if (txtAnn != null) {
+                    String fieldName = parentField == null ? field.getName() : parentField + '.' + field.getName();
+
+                    meta.getTextFields().add(fieldName);
+
+                    meta.getQueryFields().put(fieldName, field.getType());
+                }
+
+                QuerySqlField sqlAnn = field.getAnnotation(QuerySqlField.class);
+
+                if (sqlAnn != null) {
+                    String name = sqlAnn.name().isEmpty() ? field.getName() : sqlAnn.name();
+
+                    String pathStr = parentField == null ? name : parentField + '.' + name;
+
+                    processClassAnnotations(field.getType(), meta, pathStr);
+
+                    if (sqlAnn.index()) {
+                        Map<String, Class<?>> fields =
+                            sqlAnn.descending() ? meta.getDescendingFields() : meta.getAscendingFields();
+
+                        fields.put(pathStr, field.getType());
+                    }
+
+                    meta.getQueryFields().put(pathStr, field.getType());
+
+                    if (!sqlAnn.name().isEmpty())
+                        meta.addAlias(sqlAnn.name(), field.getName());
+
+                    if (!F.isEmpty(sqlAnn.groups())) {
+                        for (String grp : sqlAnn.groups()) {
+                            LinkedHashMap<String, IgniteBiTuple<Class<?>, Boolean>> fields = meta.getGroups().get(grp);
+
+                            if (fields == null) {
+                                fields = new LinkedHashMap<>();
+
+                                meta.getGroups().put(grp, fields);
+                            }
+
+                            if (fields.put(pathStr, new IgniteBiTuple<Class<?>, Boolean>(field.getType(), false)) != null)
+                                throw new IgniteCheckedException("Field " + pathStr + " already exists in group " + grp);
+                        }
+                    }
+
+/*
+                    if (!F.isEmpty(sqlAnn.orderedGroups())) {
+                        for (QuerySqlField.Group idx : sqlAnn.orderedGroups())
+                            desc.addFieldToIndex(idx.name(), prop.name(), idx.order(), idx.descending());
+                    }
+*/
+
+                }
+            }
+
+            for (Method mtd : c.getDeclaredMethods()) {
+                String mtdName = mtd.getName().startsWith("get") && mtd.getName().length() > 3 ?
+                    mtd.getName().substring(3) : mtd.getName();
+
+                QuerySqlField sqlAnn = mtd.getAnnotation(QuerySqlField.class);
+                QueryTextField txtAnn = mtd.getAnnotation(QueryTextField.class);
+
+                if (sqlAnn != null || txtAnn != null) {
+                    if (mtd.getParameterTypes().length != 0)
+                        throw new IgniteCheckedException("Getter with QuerySqlField " +
+                            "annotation cannot have parameters: " + mtd);
+
+                    Class<?> type = mtd.getReturnType();
+
+                    if (txtAnn != null) {
+                        String pathStr = parentField == null ? mtdName : parentField + '.' + mtdName;
+
+                        meta.getTextFields().add(pathStr);
+
+                        meta.getQueryFields().put(pathStr, type);
+                    }
+
+                    if (sqlAnn != null) {
+                        String name = sqlAnn.name().isEmpty() ? mtdName : sqlAnn.name();
+
+                        name = parentField == null ? name : parentField + '.' + name;
+
+                        processClassAnnotations(mtd.getReturnType(), meta, name);
+
+                        if (sqlAnn.index()) {
+                            Map<String, Class<?>> fields =
+                                sqlAnn.descending() ? meta.getDescendingFields() : meta.getAscendingFields();
+
+                            fields.put(name, type);
+                        }
+
+                        meta.getQueryFields().put(name, type);
+
+                        if (!sqlAnn.name().isEmpty())
+                            meta.addAlias(sqlAnn.name(), mtdName);
+
+                        if (!F.isEmpty(sqlAnn.groups())) {
+                            for (String grp : sqlAnn.groups()) {
+                                LinkedHashMap<String, IgniteBiTuple<Class<?>, Boolean>> fields = meta.getGroups().get(grp);
+
+                                if (fields == null) {
+                                    fields = new LinkedHashMap<>();
+
+                                    meta.getGroups().put(grp, fields);
+                                }
+
+                                if (fields.put(name, new IgniteBiTuple<Class<?>, Boolean>(mtd.getReturnType(), false)) != null)
+                                    throw new IgniteCheckedException("Field " + name + " already exists in group " + grp);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void processIndexedTypes(CacheConfiguration<?, ?> ccfg, Class<?>[] clss) throws IgniteCheckedException {
+        for (int i = 0; i < clss.length; i += 2) {
+            Class<?> keyCls = clss[i];
+            Class<?> valCls = clss[i + 1];
+
+            TypeDescriptor desc = processKeyAndValueClasses(keyCls, valCls);
+
+            addTypeByName(ccfg, desc);
+            types.put(new TypeId(ccfg.getName(), valCls), desc);
+
+            desc.registered(idx.registerType(ccfg.getName(), desc));
+        }
+    }
+
+    private void processTypeMetadata(CacheConfiguration<?, ?> ccfg) throws IgniteCheckedException {
+        for (CacheTypeMetadata meta : ccfg.getTypeMetadata()) {
+            if (F.isEmpty(meta.getValueType()))
+                throw new IgniteCheckedException("Value type is not set: " + meta);
+
+            TypeDescriptor desc = new TypeDescriptor();
+
+            Class<?> valCls = U.classForName(meta.getValueType(), null);
+
+            desc.name(valCls != null ? typeName(valCls) : meta.getValueType());
+
+            desc.valueClass(valCls != null ? valCls : Object.class);
+            desc.keyClass(
+                meta.getKeyType() == null ?
+                    Object.class :
+                    U.classForName(meta.getKeyType(), Object.class));
+
+            TypeId typeId;
+
+            if (valCls == null || ctx.cacheObjects().isPortableEnabled()) {
+                processPortableMeta(meta, desc);
+
+                typeId = new TypeId(ccfg.getName(), ctx.cacheObjects().typeId(meta.getValueType()));
+            }
+            else {
+                processClassMeta(meta, desc);
+
+                typeId = new TypeId(ccfg.getName(), valCls);
+
+                if ((U.isJdk(valCls) || idx.isGeometryClass(valCls)) && idx.isSqlType(valCls)) { // We have to index primitive _val.
+                    String idxName = "_val_idx";
+
+                    desc.addIndex(idxName, idx.isGeometryClass(valCls) ? GEO_SPATIAL : SORTED);
+
+                    desc.addFieldToIndex(idxName, "_VAL", 0, false);
+                }
+            }
+
+            addTypeByName(ccfg, desc);
+            types.put(typeId, desc);
+
+            desc.registered(idx.registerType(ccfg.getName(), desc));
         }
     }
 
@@ -1144,12 +1319,26 @@ public class GridQueryProcessor extends GridProcessorAdapter {
         assert keyCls != null;
         assert valCls != null;
 
-        for (Map.Entry<String, Class<?>> entry : meta.getAscendingFields().entrySet()) {
+        for (Map.Entry<String, Class<?>> entry : meta.getQueryFields().entrySet()) {
             ClassProperty prop = buildClassProperty(
                 keyCls,
                 valCls,
                 entry.getKey(),
-                entry.getValue());
+                entry.getValue(),
+                meta.getAliases());
+
+            d.addProperty(prop, false);
+        }
+
+        for (Map.Entry<String, Class<?>> entry : meta.getAscendingFields().entrySet()) {
+            String name = entry.getKey();
+
+            ClassProperty prop = buildClassProperty(
+                keyCls,
+                valCls,
+                name,
+                entry.getValue(),
+                meta.getAliases());
 
             d.addProperty(prop, false);
 
@@ -1165,7 +1354,8 @@ public class GridQueryProcessor extends GridProcessorAdapter {
                 keyCls,
                 valCls,
                 entry.getKey(),
-                entry.getValue());
+                entry.getValue(),
+                meta.getAliases());
 
             d.addProperty(prop, false);
 
@@ -1181,7 +1371,8 @@ public class GridQueryProcessor extends GridProcessorAdapter {
                 keyCls,
                 valCls,
                 txtIdx,
-                String.class);
+                String.class,
+                meta.getAliases());
 
             d.addProperty(prop, false);
 
@@ -1203,7 +1394,8 @@ public class GridQueryProcessor extends GridProcessorAdapter {
                         keyCls,
                         valCls,
                         idxField.getKey(),
-                        idxField.getValue().get1());
+                        idxField.getValue().get1(),
+                        meta.getAliases());
 
                     d.addProperty(prop, false);
 
@@ -1215,16 +1407,25 @@ public class GridQueryProcessor extends GridProcessorAdapter {
                 }
             }
         }
+    }
 
-        for (Map.Entry<String, Class<?>> entry : meta.getQueryFields().entrySet()) {
-            ClassProperty prop = buildClassProperty(
-                keyCls,
-                valCls,
-                entry.getKey(),
-                entry.getValue());
+    private String resolveAliases(String key, CacheTypeMetadata meta) {
+        Map<String, String> aliases = meta.getAliases();
 
-            d.addProperty(prop, false);
+        String[] tokens = key.split("\\.");
+
+        StringBuilder sb = new StringBuilder();
+
+        for (String token : tokens) {
+            String name = aliases.get(token);
+
+            if (sb.length() > 0)
+                sb.append('.');
+
+            sb.append(name == null ? token : name);
         }
+
+        return sb.toString();
     }
 
     /**
@@ -1327,16 +1528,17 @@ public class GridQueryProcessor extends GridProcessorAdapter {
      * @return Class property.
      * @throws IgniteCheckedException If failed.
      */
-    private static ClassProperty buildClassProperty(Class<?> keyCls, Class<?> valCls, String pathStr, Class<?> resType)
+    private static ClassProperty buildClassProperty(Class<?> keyCls, Class<?> valCls, String pathStr, Class<?> resType, Map<String, String> aliases)
         throws IgniteCheckedException {
         ClassProperty res = buildClassProperty(
             true,
             keyCls,
             pathStr,
-            resType);
+            resType,
+            aliases);
 
         if (res == null) // We check key before value consistently with PortableProperty.
-            res = buildClassProperty(false, valCls, pathStr, resType);
+            res = buildClassProperty(false, valCls, pathStr, resType, aliases);
 
         if (res == null)
             throw new IgniteCheckedException("Failed to initialize property '" + pathStr + "' for " +
@@ -1354,7 +1556,7 @@ public class GridQueryProcessor extends GridProcessorAdapter {
      * @return Property instance corresponding to the given path.
      * @throws IgniteCheckedException If property cannot be created.
      */
-    static ClassProperty buildClassProperty(boolean key, Class<?> cls, String pathStr, Class<?> resType)
+    static ClassProperty buildClassProperty(boolean key, Class<?> cls, String pathStr, Class<?> resType, Map<String, String> aliases)
         throws IgniteCheckedException {
         String[] path = pathStr.split("\\.");
 
@@ -1363,10 +1565,15 @@ public class GridQueryProcessor extends GridProcessorAdapter {
         for (String prop : path) {
             ClassProperty tmp;
 
+            String fieldName = aliases.get(prop);
+
+            if (fieldName == null)
+                fieldName = prop;
+
             try {
                 StringBuilder bld = new StringBuilder("get");
 
-                bld.append(prop);
+                bld.append(fieldName);
 
                 bld.setCharAt(3, Character.toUpperCase(bld.charAt(3)));
 
@@ -1374,12 +1581,14 @@ public class GridQueryProcessor extends GridProcessorAdapter {
             }
             catch (NoSuchMethodException ignore) {
                 try {
-                    tmp = new ClassProperty(cls.getDeclaredField(prop), key);
+                    tmp = new ClassProperty(cls.getDeclaredField(fieldName), key);
                 }
                 catch (NoSuchFieldException ignored) {
                     return null;
                 }
             }
+
+            tmp.name(prop);
 
             tmp.parent(res);
 

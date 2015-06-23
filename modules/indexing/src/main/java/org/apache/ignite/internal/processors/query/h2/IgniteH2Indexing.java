@@ -632,6 +632,8 @@ public class IgniteH2Indexing implements GridQueryIndexing {
         PreparedStatement stmt;
 
         try {
+//            System.out.println("!!! SQL: " + sql);
+
             stmt = conn.prepareStatement(sql);
         }
         catch (SQLException e) {
