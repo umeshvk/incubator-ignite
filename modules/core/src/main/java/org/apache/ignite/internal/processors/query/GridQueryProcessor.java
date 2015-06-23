@@ -159,8 +159,32 @@ public class GridQueryProcessor extends GridProcessorAdapter {
             meta.setKeyType(keyCls);
             meta.setValueType(valCls);
 
-            processClassAnnotations(keyCls, meta, null);
-            processClassAnnotations(valCls, meta, null);
+            Map<String, TreeMap<Integer, T3<String, Class<?>, Boolean>>> orderedGroups = new HashMap<>();
+
+            processClassAnnotations(keyCls, meta, null, orderedGroups);
+            processClassAnnotations(valCls, meta, null, orderedGroups);
+
+            for (Map.Entry<String, TreeMap<Integer, T3<String, Class<?>, Boolean>>> entry : orderedGroups.entrySet()) {
+                String grp = entry.getKey();
+
+                Map<String, LinkedHashMap<String, IgniteBiTuple<Class<?>, Boolean>>> groups = meta.getGroups();
+
+                LinkedHashMap<String, IgniteBiTuple<Class<?>, Boolean>> fields = groups.get(grp);
+
+                if (fields == null)
+                    groups.put(grp, fields = new LinkedHashMap<>());
+
+                for (Map.Entry<Integer, T3<String, Class<?>, Boolean>> ordFields : entry.getValue().entrySet()) {
+                    String name = ordFields.getValue().get1();
+
+                    Class<?> cls = ordFields.getValue().get2();
+
+                    Boolean desc = ordFields.getValue().get3();
+
+                    if (fields.put(name, new T2<Class<?>, Boolean>(cls, desc)) != null)
+                        throw new IgniteCheckedException("Field " + name + " already exists in group " + grp);
+                }
+            }
 
             metadata.add(meta);
         }
@@ -173,8 +197,10 @@ public class GridQueryProcessor extends GridProcessorAdapter {
      * @param meta Type metadata.
      * @param parentField Parent field name.
      */
-    private void processClassAnnotations(Class<?> cls, CacheTypeMetadata meta, String parentField)
-        throws IgniteCheckedException {
+    private void processClassAnnotations(Class<?> cls, CacheTypeMetadata meta,
+        String parentField, Map<String, TreeMap<Integer, T3<String, Class<?>, Boolean>>> orderedGroups)
+        throws IgniteCheckedException
+    {
         if (U.isJdk(cls) || idx.isGeometryClass(cls))
             return;
 
@@ -197,7 +223,7 @@ public class GridQueryProcessor extends GridProcessorAdapter {
 
                     String pathStr = parentField == null ? name : parentField + '.' + name;
 
-                    processClassAnnotations(field.getType(), meta, pathStr);
+                    processClassAnnotations(field.getType(), meta, pathStr, orderedGroups);
 
                     if (sqlAnn.index()) {
                         Map<String, Class<?>> fields =
@@ -215,24 +241,29 @@ public class GridQueryProcessor extends GridProcessorAdapter {
                         for (String grp : sqlAnn.groups()) {
                             LinkedHashMap<String, IgniteBiTuple<Class<?>, Boolean>> fields = meta.getGroups().get(grp);
 
-                            if (fields == null) {
-                                fields = new LinkedHashMap<>();
-
-                                meta.getGroups().put(grp, fields);
-                            }
+                            if (fields == null)
+                                meta.getGroups().put(grp, fields = new LinkedHashMap<>());
 
                             if (fields.put(pathStr, new IgniteBiTuple<Class<?>, Boolean>(field.getType(), false)) != null)
                                 throw new IgniteCheckedException("Field " + pathStr + " already exists in group " + grp);
                         }
                     }
 
-/*
                     if (!F.isEmpty(sqlAnn.orderedGroups())) {
-                        for (QuerySqlField.Group idx : sqlAnn.orderedGroups())
-                            desc.addFieldToIndex(idx.name(), prop.name(), idx.order(), idx.descending());
-                    }
-*/
+                        for (QuerySqlField.Group idx : sqlAnn.orderedGroups()) {
+                            TreeMap<Integer, T3<String, Class<?>, Boolean>> orderedFields = orderedGroups.get(idx.name());
 
+                            if (orderedFields == null)
+                                orderedGroups.put(idx.name(), orderedFields = new TreeMap<>());
+
+                            T3<String, Class<?>, Boolean> grp =
+                                new T3<String, Class<?>, Boolean>(pathStr, field.getType(), idx.descending());
+
+                            if (orderedFields.put(idx.order(), grp) != null)
+                                throw new IgniteCheckedException("Field " + pathStr + " has duplicated order " +
+                                    idx.order() + " in group " + idx.name());
+                        }
+                    }
                 }
             }
 
@@ -263,7 +294,7 @@ public class GridQueryProcessor extends GridProcessorAdapter {
 
                         name = parentField == null ? name : parentField + '.' + name;
 
-                        processClassAnnotations(mtd.getReturnType(), meta, name);
+                        processClassAnnotations(mtd.getReturnType(), meta, name, orderedGroups);
 
                         if (sqlAnn.index()) {
                             Map<String, Class<?>> fields =
@@ -289,6 +320,22 @@ public class GridQueryProcessor extends GridProcessorAdapter {
 
                                 if (fields.put(name, new IgniteBiTuple<Class<?>, Boolean>(mtd.getReturnType(), false)) != null)
                                     throw new IgniteCheckedException("Field " + name + " already exists in group " + grp);
+                            }
+                        }
+
+                        if (!F.isEmpty(sqlAnn.orderedGroups())) {
+                            for (QuerySqlField.Group idx : sqlAnn.orderedGroups()) {
+                                TreeMap<Integer, T3<String, Class<?>, Boolean>> orderedFields = orderedGroups.get(idx.name());
+
+                                if (orderedFields == null)
+                                    orderedGroups.put(idx.name(), orderedFields = new TreeMap<>());
+
+                                T3<String, Class<?>, Boolean> grp =
+                                    new T3<String, Class<?>, Boolean>(name, mtd.getReturnType(), idx.descending());
+
+                                if (orderedFields.put(idx.order(), grp) != null)
+                                    throw new IgniteCheckedException("Field " + name + " has duplicated order " +
+                                        idx.order() + " in group " + idx.name());
                             }
                         }
                     }
